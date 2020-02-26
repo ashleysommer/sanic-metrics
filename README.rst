@@ -27,7 +27,7 @@ Ashley Sommer `ashleysommer@gmail.com <ashleysommer@gmail.com>`__
 .. |Build Status| image:: https://api.travis-ci.org/ashleysommer/sanic-metrics.svg?branch=master
    :target: https://travis-ci.org/ashleysommer/sanic-metrics
 
-.. |Latest Version| image:: https://img.shields.io/pypi/v/Sanic-Plugins-Framework.svg
+.. |Latest Version| image:: https://img.shields.io/pypi/v/sanic-metrics.svg
    :target: https://pypi.python.org/pypi/sanic-metrics/
 
 .. |Supported Python versions| image:: https://img.shields.io/pypi/pyversions/sanic-metrics.svg
