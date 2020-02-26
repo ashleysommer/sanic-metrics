@@ -39,7 +39,7 @@ class SanicMetrics(SanicPlugin):
             },
             'log': {
                 'format': 'common',  # common, combined, vcommon, vcombined, w3c
-                'filename': 'metrics.txt'  # relative or absolute file path and file name
+                'filename': 'access_{date:s}.txt'  # relative or absolute file path and file name
             },
             'save_headers': {  # save_headers can be False itself.
                 'Host': True,
@@ -118,6 +118,7 @@ class SanicMetrics(SanicPlugin):
         log_str = ""
         client = metrics.get('client', "0.0.0.0")
         method = metrics.get('method', 'GET')
+        reqversion = metrics.get('reqversion', "1.0")
         nbytes = metrics.get('bytes', 0)
         status = metrics.get('status', 0)
         dt = metrics.get('datetime_start', datetime.now(tz=timezone.utc))
@@ -133,7 +134,7 @@ class SanicMetrics(SanicPlugin):
             p = ""+urlpath
             if qs:
                 p += qs
-            rq_string = "{m:s} {p:s} HTTP/1.1".format(m=method, p=p)
+            rq_string = "{m:s} {p:s} HTTP/{v:s}".format(m=method, p=p, v=reqversion)
             log_str += "{client:s} {rfc931:s} {username:s} [{dt:s}] \"{rq:s}\" {status:d} {nbytes:d}"\
                 .format(client=client, username=client_username, rfc931=client_rfc931, dt=dt_string, rq=rq_string,
                         status=status, nbytes=nbytes)
@@ -157,12 +158,14 @@ class SanicMetrics(SanicPlugin):
             if qs is None:
                 qs = ""
             #date time s-ip cs-method cs-uri-stem cs-uri-query cs-version cs-bytes c-ip cs(User-Agent) cs(Referrer) sc-status sc-version sc-bytes time-taken
-            log_str += "{dt:s} {host:s} {method:s} {p:s} {qs:s} HTTP/1.1 {reqbytes:d} {client:s} {user_agent:s} {referrer:s} {status:d} HTTP/1.1 {nbytes:d} {time_taken:f}" \
-                .format(dt=dt_string, host=host, method=method, p=urlpath, qs=qs, reqbytes=reqbytes, client=client,
+            log_str += "{dt:s} {host:s} {method:s} {p:s} {qs:s} HTTP/{reqvers:s} {reqbytes:d} {client:s} {user_agent:s} {referrer:s} {status:d} HTTP/1.1 {nbytes:d} {time_taken:f}" \
+                .format(dt=dt_string, host=host, method=method, p=urlpath, qs=qs, reqvers=reqversion, reqbytes=reqbytes, client=client,
                         user_agent=user_agent, referrer=referrer, status=status, nbytes=nbytes, time_taken=time_taken)
         else:
             raise NotImplementedError("Cannot log metrics for format {}".format(format))
-        filename = log.get('filename', "metrics.txt")
+        filename = log.get('filename', "access_{date:s}.txt")
+        file_date = dt.strftime("%Y%m%d")
+        filename = filename.format(date=file_date, host=host)
         if not path.exists(filename):
             cls.write_log_header(format, filename)
         with open(filename, "a+", encoding='utf-8') as f:
@@ -204,6 +207,10 @@ class SanicMetrics(SanicPlugin):
             remote_addr = request.remote_addr or request.ip
         except (AttributeError, LookupError):
             remote_addr = request.ip
+        try:
+            req_version = request.version
+        except (AttributeError, LookupError):
+            req_version = "1.0"
         headers = cls.collect_headers(request, context)
         path = request.path
         qs = request.query_string
@@ -218,6 +225,7 @@ class SanicMetrics(SanicPlugin):
         except (AttributeError, LookupError):
             details['reqbytes'] = 0
         details['host'] = host
+        details['reqversion'] = req_version
         details['method'] = request.method
         details['path'] = path
         details['qs'] = qs
@@ -300,6 +308,7 @@ def metrics_post_resp(request, response, context):
         metrics['cookies'] = None
     metrics['method'] = private_request_context.get('method', 'GET')
     metrics['reqbytes'] = private_request_context.get('reqbytes', 0)
+    metrics['reqversion'] = private_request_context.get('reqversion', "1.0")
     metrics['path'] = private_request_context.get('path', "/")
     metrics['qs'] = private_request_context.get('qs', None)
     metrics['headers'] = private_request_context.get('headers', {})
