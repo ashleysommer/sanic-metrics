@@ -10,6 +10,7 @@ from spf.plugin import PluginAssociated
 from sanic import __version__ as sanic_version
 from sanic.request import Request
 from sanic.response import HTTPResponse, StreamingHTTPResponse
+from aiofiles.threadpool import _open as async_open
 from .util import recursive_update, datetime_to_iso
 from .version import __version__ as sanic_metrics_version
 
@@ -109,7 +110,7 @@ class SanicMetrics(SanicPlugin):
         return opt_choice
 
     @classmethod
-    def log_metrics(cls, metrics, context):
+    async def log_metrics(cls, metrics, context):
         config = context.get('config', {})
         log = config.get('log', {})
         if not log:
@@ -127,7 +128,8 @@ class SanicMetrics(SanicPlugin):
         qs = metrics.get('qs')
         if format in ("common", "combined", "vcommon", "vcombined"):
             if format.startswith('v'):
-                log_str += "{host:s}: ".format(host=host)
+                no_colon_host = host.replace(":", "")
+                log_str += "{host:s}: ".format(host=no_colon_host)
             client_rfc931 = metrics.get('client_rfc931', '-')
             client_username = metrics.get('client_username', '-')
             dt_string = dt.strftime("%d/%b/%Y:%H:%M:%S %z")
@@ -167,14 +169,28 @@ class SanicMetrics(SanicPlugin):
         file_date = dt.strftime("%Y%m%d")
         filename = filename.format(date=file_date, host=host)
         if not path.exists(filename):
-            cls.write_log_header(format, filename)
-        with open(filename, "a+", encoding='utf-8') as f:
-            f.write(log_str)
-            f.write('\n')
+            await cls.write_log_header(format, filename)
+
+        # Can't use Async-With here because I need this to work on Python 3.5
+        # So this is a very convoluted way of doing it.
+        f = None
+        try:
+            # Buffering=0 is _way_ faster than buffering=1 or buffering=-1 on my computer
+            # still don't know why. Maybe my very fast nvme ssd?
+            # But we don't use that in case of async access collisions
+            f = await async_open(filename, "a+b", buffering=4096)
+            try:
+                await f.write(log_str.encode('utf-8')+b'\n')
+            finally:
+                await f.close()
+            return
+        except:
+            if f is not None and not f.closed:
+                await f.close()
         return
 
     @classmethod
-    def write_log_header(cls, format, filename):
+    async def write_log_header(cls, format, filename):
         if format in ("combined", "common", "vcombined", "vcommon"):
             return
         if format == "w3c":
@@ -184,7 +200,7 @@ class SanicMetrics(SanicPlugin):
 # Date: {now_date:s}
 # Fields: date time s-ip cs-method cs-uri-stem cs-uri-query cs-version cs-bytes c-ip cs(User-Agent) cs(Referrer) sc-status sc-version sc-bytes time-taken
 '''
-            # the fields are arranged to match the w3c log string parser in GoAccess log parser
+            # the fields are arranged to match the w3c log string format in GoAccess log parser
             # "%d %t %^ %m %U %q %^ %^ %h %u %R %s %^ %^ %L",
             # date, time, skip, method, request, q, skip, skip, remote_host, useragent, referrer, status, skip, skip, time_taken_ms
             now_date = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -192,9 +208,22 @@ class SanicMetrics(SanicPlugin):
                                    now_date=now_date)
         else:
             raise NotImplementedError("Cannot write logfile header for format {}".format(format))
-        with open(filename, "w", encoding='utf-8') as f:
-            f.write(header)
-        return
+
+        # Can't use Async-With here because I need this to work on Python 3.5
+        # So this is a very convoluted way of doing it.
+        f = None
+        try:
+            # Buffering=0 is _way_ faster than buffering=1 or buffering=-1 on my computer
+            # still don't know why. Maybe my very fast nvme ssd?
+            f = await async_open(filename, "wb", buffering=4096)
+            try:
+                await f.write(header.encode('utf-8'))
+            finally:
+                await f.close()
+            return
+        except:
+            if f is not None and not f.closed:
+                await f.close()
 
     @classmethod
     def get_details_from_request(cls, request, context):
@@ -261,7 +290,7 @@ def metrics_pre_req(request, context):
 
 
 @sanic_metrics.middleware(attach_to='response', relative='post', priority=2, with_context=True)
-def metrics_post_resp(request, response, context):
+async def metrics_post_resp(request, response, context):
     """
 
     :param Request request:
@@ -321,7 +350,7 @@ def metrics_post_resp(request, response, context):
     metrics["datetime_end_iso"] = datetime_to_iso(datetime_now)
     time_delta_ms = (time_post - time_pre) * 1000.0
     metrics["time_delta_ms"] = time_delta_ms
-    sanic_metrics.log_metrics(metrics, context)
+    await sanic_metrics.log_metrics(metrics, context)
     return False
 
 
