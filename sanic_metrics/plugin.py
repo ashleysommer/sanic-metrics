@@ -3,7 +3,7 @@
 import time
 from datetime import datetime, timedelta, timezone
 from typing import List
-from os import path
+from os import path, mkdir
 from spf import SanicPluginsFramework, SanicPlugin
 from spf.context import SanicContext
 from spf.plugin import PluginAssociated
@@ -35,12 +35,14 @@ class SanicMetrics(SanicPlugin):
         return {
             'opt': {
                 'type': 'in',
-                'method': 'args',
-                'key': 'metrics'
+                'method': 'args',  # args, headers
+                'key': 'metrics'  # for headers, use key like X-Collect-Metrics
             },
             'log': {
                 'format': 'common',  # common, combined, vcommon, vcombined, w3c
-                'filename': 'access_{date:s}.txt'  # relative or absolute file path and file name
+                'filename': 'access_{date:s}.txt',  # relative or absolute file path and file name
+                # filename property can use {date:s}, {host:s}, {ipvx:s} to add dynamic components
+                'remove_ipv6_brackets': True  # most log formats don't like ipv6 in brackets
             },
             'save_headers': {  # save_headers can be False itself.
                 'Host': True,
@@ -62,7 +64,7 @@ class SanicMetrics(SanicPlugin):
     def collect_headers(cls, request, context):
         if request is None:
             return {}
-        h = request.headers  # type: List[MultiDict]
+        h = request.headers  # type: MultiDict #Actually CIMultiDict, aliased in import
         if h is None:
             return {}
         config = context.get('config', {})
@@ -94,13 +96,16 @@ class SanicMetrics(SanicPlugin):
         if opt_method == "args":
             opt_key = opt.get("key", "metrics")
             val = request.args.getlist(opt_key, [None])[-1]
-            if val is None:
-                val = True if opt_type == "out" else False
-            else:
-                val = val in TRUTHS
+        elif opt_method == "headers":
+            opt_key = opt.get("key", "X-Collect-Metrics")
+            val = request.headers.getall(opt_key, [None])[-1]
         else:
-            # opt_out method not implemented
-            raise NotImplementedError("Opt-in method {}".format(opt_method))
+            # opt_in/opt_out method not implemented
+            raise NotImplementedError("Opt-in/Out-out method {}".format(opt_method))
+        if val is None:
+            val = True if opt_type == "out" else False
+        else:
+            val = val in TRUTHS
         if opt_type == "out":
             opt_choice = False if val is False else True
         else:
@@ -116,14 +121,20 @@ class SanicMetrics(SanicPlugin):
         if not log:
             return
         format = log.get('format', 'common').strip().lower()
+        remove_ipv6_brackets = log.get('remove_ipv6_brackets', True)
         log_str = ""
         client = metrics.get('client', "0.0.0.0")
+        ipvx = "ipv6" if (client.startswith('[') or ":" in client) else "ipv4"
+        if remove_ipv6_brackets:
+            client = client.lstrip('[').rstrip(']')
         method = metrics.get('method', 'GET')
         reqversion = metrics.get('reqversion', "1.0")
         nbytes = metrics.get('bytes', 0)
         status = metrics.get('status', 0)
         dt = metrics.get('datetime_start', datetime.now(tz=timezone.utc))
         host = metrics.get('host', "127.0.0.1")
+        if remove_ipv6_brackets:
+            host = host.lstrip('[').rstrip(']')
         urlpath = metrics.get('path', '/')
         qs = metrics.get('qs')
         if format in ("common", "combined", "vcommon", "vcombined"):
@@ -167,7 +178,15 @@ class SanicMetrics(SanicPlugin):
             raise NotImplementedError("Cannot log metrics for format {}".format(format))
         filename = log.get('filename', "access_{date:s}.txt")
         file_date = dt.strftime("%Y%m%d")
-        filename = filename.format(date=file_date, host=host)
+        filename = filename.format(date=file_date, host=host, ipvx=ipvx)
+        dirname = path.dirname(filename)
+        if dirname:
+            abs_dir = path.abspath(dirname)
+            if not path.exists(abs_dir):
+                try:
+                    mkdir(abs_dir)
+                except:
+                    raise RuntimeError("Cannot create directory! {}".format(abs_dir))
         if not path.exists(filename):
             await cls.write_log_header(format, filename)
 
@@ -303,19 +322,20 @@ async def metrics_post_resp(request, response, context):
         # opted out of metrics
         return
     try:
-        private_request_context = context.for_request(request)
-        time_pre = private_request_context.get("time_pre", None)
+        rctx = context.for_request(request)
+        time_pre = rctx.get("time_pre", None)
     except (AttributeError, LookupError):
-        # No request context. Must be a sanic 19.12+ route not-found error.
-        # We can work around this
-        private_request_context = sanic_metrics.get_details_from_request(request, context)
+        # No request context. Must be a sanic 19.12+ route-not-found error.
+        # We can work around this, just get the details now
+        rctx = sanic_metrics.get_details_from_request(request, context)
         time_pre = time_post
     if time_pre is None:
-        # No time_pre? request_middleware probably didn't run, skip metrics
+        # No time_pre? request_middleware probably didn't run, errored, or was cancelled. Skip metrics
         return
     config = context.get('config', {})
     do_cookies = config.get('save_cookies', False)
     metrics = {}
+    metrics['timestamp_start'] = time_pre
     datetime_pre = datetime.fromtimestamp(time_pre, tz=timezone.utc)
     metrics["datetime_start"] = datetime_pre
     metrics["datetime_start_iso"] = datetime_to_iso(datetime_pre)
@@ -335,16 +355,17 @@ async def metrics_post_resp(request, response, context):
         metrics['status'] = 500
         metrics['bytes'] = 0
         metrics['cookies'] = None
-    metrics['method'] = private_request_context.get('method', 'GET')
-    metrics['reqbytes'] = private_request_context.get('reqbytes', 0)
-    metrics['reqversion'] = private_request_context.get('reqversion', "1.0")
-    metrics['path'] = private_request_context.get('path', "/")
-    metrics['qs'] = private_request_context.get('qs', None)
-    metrics['headers'] = private_request_context.get('headers', {})
-    metrics['host'] = private_request_context.get('host', "127.0.0.1")
-    metrics['client'] = private_request_context.get('remote_addr', "0.0.0.0")
+    metrics['method'] = rctx.get('method', 'GET')
+    metrics['reqbytes'] = rctx.get('reqbytes', 0)
+    metrics['reqversion'] = rctx.get('reqversion', "1.0")
+    metrics['path'] = rctx.get('path', "/")
+    metrics['qs'] = rctx.get('qs', None)
+    metrics['headers'] = rctx.get('headers', {})
+    metrics['host'] = rctx.get('host', "127.0.0.1")
+    metrics['client'] = rctx.get('remote_addr', "0.0.0.0")
     # Last thing, collect final time
     time_post = time.time()
+    metrics['timestamp_end'] = time_post
     datetime_now = datetime.fromtimestamp(time_post, tz=timezone.utc)
     metrics["datetime_end"] = datetime_now
     metrics["datetime_end_iso"] = datetime_to_iso(datetime_now)
