@@ -1,16 +1,26 @@
 from sanic import Sanic
 from sanic.response import text
 from spf import SanicPluginsFramework
+from spf.plugins import contextualize
 from sanic_metrics import sanic_metrics
 
 app = Sanic(__name__)
 spf = SanicPluginsFramework(app)
-
+ctx = spf.register_plugin(contextualize)
 metrics = spf.register_plugin(sanic_metrics, opt={'type': 'out'}, log={'format': 'vcombined'})
 
 @app.route("/")
 def index(request):
     return text("hello world")
 
+@ctx.route("/override")
+async def orr(request, context):
+    rctx = context.for_request(request)
+    shared_ctx = context.shared
+    shared_rctx = shared_ctx.for_request(request)
+    override_metrics = {'status': "999"}
+    shared_rctx['override_metrics'] = override_metrics
+    return text("hello world")
+
 if __name__ == "__main__":
-    app.run("127.0.0.1", 8082, debug=True, auto_reload=False)
+    app.run("127.0.0.1", 8083, debug=True, auto_reload=False)

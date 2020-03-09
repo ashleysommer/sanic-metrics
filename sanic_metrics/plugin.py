@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 import time
+from asyncio import iscoroutinefunction
 from datetime import datetime, timedelta, timezone
 from typing import List
 from os import path, mkdir
@@ -50,6 +51,10 @@ class SanicMetrics(SanicPlugin):
                 "User-Agent": True,
                 "X-Forwarded-For": True,
                 "X-Forwarded-Host": True
+            },
+            'hooks': {
+                "pre_request": None,
+                "post_response": None,
             },
             'save_cookies': False,
         }
@@ -129,8 +134,8 @@ class SanicMetrics(SanicPlugin):
             client = client.lstrip('[').rstrip(']')
         method = metrics.get('method', 'GET')
         reqversion = metrics.get('reqversion', "1.0")
-        nbytes = metrics.get('bytes', 0)
-        status = metrics.get('status', 0)
+        nbytes = int(metrics.get('bytes', 0))
+        status = int(metrics.get('status', 0))
         dt = metrics.get('datetime_start', datetime.now(tz=timezone.utc))
         host = metrics.get('host', "127.0.0.1")
         if remove_ipv6_brackets:
@@ -164,7 +169,7 @@ class SanicMetrics(SanicPlugin):
         elif format == "w3c":
             reqbytes = metrics.get('reqbytes', 0)
             headers = metrics.get('headers', {})
-            time_taken = metrics.get('time_delta_ms', 0)
+            time_taken = float(metrics.get('time_delta_ms', 0.0))
             referrer = (headers.get('Referer', []) or [""])[-1].replace(" ", "+")
             user_agent = (headers.get('User-Agent', []) or [""])[-1].replace(" ", "+")
             dt_string = dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -286,7 +291,7 @@ sanic_metrics = instance = SanicMetrics()
 
 
 @sanic_metrics.middleware(attach_to='request', relative='pre', priority=2, with_context=True)
-def metrics_pre_req(request, context):
+async def metrics_pre_req(request, context):
     """
 
     :param Request request:
@@ -294,6 +299,7 @@ def metrics_pre_req(request, context):
     :return:
     """
     time_pre = time.time()
+
     try:
         private_request_context = context.for_request(request)
     except (AttributeError, LookupError):
@@ -302,9 +308,24 @@ def metrics_pre_req(request, context):
     if not sanic_metrics.get_opt(request, context):
         # opted out of metrics
         return False
-    details = sanic_metrics.get_details_from_request(request, context)
-    private_request_context.update(details)
-    private_request_context['time_pre'] = time_pre
+    config = context.get('config', {})
+    hooks = config.get('hooks', {})
+    my_metrics = {
+        'time_pre': time_pre,
+        'skip_request': False
+    }
+    if hooks:
+        pre_request_hook = hooks.get('pre_request', None)
+        if pre_request_hook:
+            is_awaitable = iscoroutinefunction(pre_request_hook)
+            resp = pre_request_hook(request, context, my_metrics)
+            if is_awaitable:
+                await resp
+    skip_request = my_metrics.get('skip_request', False)
+    if not skip_request:
+        details = sanic_metrics.get_details_from_request(request, context)
+        private_request_context.update(details)
+    private_request_context.update(my_metrics)
     return False
 
 
@@ -327,19 +348,41 @@ async def metrics_post_resp(request, response, context):
     except (AttributeError, LookupError):
         # No request context. Must be a sanic 19.12+ route-not-found error.
         # We can work around this, just get the details now
-        rctx = sanic_metrics.get_details_from_request(request, context)
+        req_metrics = sanic_metrics.get_details_from_request(request, context)
+        rctx = context.create_child_context(req_metrics)
         time_pre = time_post
     if time_pre is None:
         # No time_pre? request_middleware probably didn't run, errored, or was cancelled. Skip metrics
         return
     config = context.get('config', {})
     do_cookies = config.get('save_cookies', False)
-    metrics = {}
-    metrics['timestamp_start'] = time_pre
+    metrics = {
+        'timestamp_start': time_pre,
+        'skip_response': False,
+        'skip_logging': False,
+    }
     datetime_pre = datetime.fromtimestamp(time_pre, tz=timezone.utc)
     metrics["datetime_start"] = datetime_pre
     metrics["datetime_start_iso"] = datetime_to_iso(datetime_pre)
-    if response:
+    metrics['method'] = rctx.get('method', 'GET')
+    metrics['reqbytes'] = rctx.get('reqbytes', 0)
+    metrics['reqversion'] = rctx.get('reqversion', "1.0")
+    metrics['path'] = rctx.get('path', "/")
+    metrics['qs'] = rctx.get('qs', None)
+    metrics['headers'] = rctx.get('headers', {})
+    metrics['host'] = rctx.get('host', "127.0.0.1")
+    metrics['client'] = rctx.get('remote_addr', "0.0.0.0")
+    hooks = config.get('hooks', {})
+
+    if hooks:
+        post_response_hook = hooks.get('post_response', None)
+        if post_response_hook:
+            is_awaitable = iscoroutinefunction(post_response_hook)
+            resp = post_response_hook(request, response, context, metrics)
+            if is_awaitable:
+                await resp
+    skip_response = metrics.get('skip_response', False)
+    if response and not skip_response:
         metrics['status'] = response.status
         try:
             resp_bytes = len(response.body)
@@ -355,24 +398,24 @@ async def metrics_post_resp(request, response, context):
         metrics['status'] = 500
         metrics['bytes'] = 0
         metrics['cookies'] = None
-    metrics['method'] = rctx.get('method', 'GET')
-    metrics['reqbytes'] = rctx.get('reqbytes', 0)
-    metrics['reqversion'] = rctx.get('reqversion', "1.0")
-    metrics['path'] = rctx.get('path', "/")
-    metrics['qs'] = rctx.get('qs', None)
-    metrics['headers'] = rctx.get('headers', {})
-    metrics['host'] = rctx.get('host', "127.0.0.1")
-    metrics['client'] = rctx.get('remote_addr', "0.0.0.0")
+    try:
+        shared_context = context.shared
+        shared_request_context = shared_context.for_request(request)
+        override_metrics = shared_request_context.get('override_metrics', None)
+    except (AttributeError, LookupError):
+        override_metrics = None
+    if override_metrics:
+        metrics.update(override_metrics)
+    skip_logging = metrics.get('skip_logging', False)
     # Last thing, collect final time
-    time_post = time.time()
+    time_post = metrics.get('timestamp_end', None) or time.time()
     metrics['timestamp_end'] = time_post
     datetime_now = datetime.fromtimestamp(time_post, tz=timezone.utc)
     metrics["datetime_end"] = datetime_now
     metrics["datetime_end_iso"] = datetime_to_iso(datetime_now)
     time_delta_ms = (time_post - time_pre) * 1000.0
     metrics["time_delta_ms"] = time_delta_ms
-    await sanic_metrics.log_metrics(metrics, context)
+    if not skip_logging:
+        await sanic_metrics.log_metrics(metrics, context)
     return False
-
-
 
