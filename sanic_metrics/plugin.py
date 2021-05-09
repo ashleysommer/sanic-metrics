@@ -419,3 +419,9 @@ async def metrics_post_resp(request, response, context):
         await sanic_metrics.log_metrics(metrics, context)
     return False
 
+@sanic_metrics.listener("after_server_start")
+def on_start(app, loop):
+    proxies_count = app.config.PROXIES_COUNT
+    if proxies_count is not None and proxies_count < 1:
+        raise RuntimeError("Please set PROXIES_COUNT > 0 or None")
+

@@ -5,7 +5,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 name = "sanic-metrics"
 description = "Sanic plugin for capturing and logging access"
-version = "0.0.7"
+version = "0.0.7.post1"
 authors = ["Ashley Sommer <ashleysommer@gmail.com>"]
 license = "Apache-2.0"
 readme = "README.rst"
