@@ -1,13 +1,13 @@
 from sanic import Sanic
 from sanic.response import text
-from spf import SanicPluginsFramework
-from spf.plugins import contextualize
+from sanic_plugin_toolkit import SanicPluginRealm
+from sanic_plugin_toolkit.plugins import contextualize
 from sanic_metrics import sanic_metrics
 
 app = Sanic(__name__)
-spf = SanicPluginsFramework(app)
-ctx = spf.register_plugin(contextualize)
-metrics = spf.register_plugin(sanic_metrics, opt={'type': 'out'}, log={'format': 'vcombined'})
+realm = SanicPluginRealm(app)
+ctx = realm.register_plugin(contextualize)
+metrics = realm.register_plugin(sanic_metrics, opt={'type': 'out'}, log={'format': 'vcombined'})
 
 @app.route("/")
 def index(request):
@@ -23,4 +23,4 @@ async def orr(request, context):
     return text("hello world")
 
 if __name__ == "__main__":
-    app.run("127.0.0.1", 8083, debug=True, auto_reload=False)
+    app.run("127.0.0.1", 8083, debug=True, auto_reload=False, access_log=False)
